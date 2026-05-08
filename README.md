@@ -1,4 +1,4 @@
-# iterm2-harness
+# iTerm2 Harness
 
 An **AI-friendly control surface for iTerm2**, built on iTerm2's official Python API. It exposes a small, self-describing HTTP API that lets an AI agent (Claude Code, GPT-based tools, custom scripts, …) automate your iTerm2 workspace — list windows / tabs / sessions, read screen contents with scrollback, send text and keystrokes, rename sessions, and so on.
 

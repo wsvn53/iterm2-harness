@@ -4,7 +4,7 @@ description: Control iTerm2 over an authenticated HTTP API — list windows/tabs
 allowed-tools: Bash(curl:*), Read
 ---
 
-# iterm2-harness
+# iTerm2 Harness
 
 HTTP API exposed by the `iterm2-harness.py` script running inside iTerm2. Provides authenticated, audited remote control over iTerm2 windows/tabs/sessions.
 
