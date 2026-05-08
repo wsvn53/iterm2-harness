@@ -6,6 +6,31 @@ Includes **simple but real authorization**: every new device must be approved vi
 
 Designed to be installed into iTerm2's `AutoLaunch` directory so the service starts with iTerm2.
 
+```
+   ┌──────────────────────────────────────────────────────────────┐
+   │            Driver Agent  (OpenClaw / HermesAgent /           │
+   │              Minis / your own orchestrator)                  │
+   └──────────────┬───────────────────────────────────────────────┘
+                  │  HTTP + Bearer token
+                  ▼
+        ┌────────────────────┐
+        │  iterm2-harness    │   auth · audit · API directory
+        │   (HTTP server)    │
+        └─────────┬──────────┘
+                  │  iterm2 Python API (WebSocket)
+                  ▼
+   ┌──────────────────────────────────────────────────────────────┐
+   │                          iTerm2.app                          │
+   │ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌───────┐ │
+   │ │ pane: claude │ │ pane: codex  │ │ pane: gemini │ │  …    │ │
+   │ │  (Claude Code)│ │              │ │              │ │       │ │
+   │ └──────────────┘ └──────────────┘ └──────────────┘ └───────┘ │
+   │  list / read screen / send keys / rename · per native CLI    │
+   └──────────────────────────────────────────────────────────────┘
+```
+
+The driver agent picks which pane runs which coding agent (Claude Code, Codex, Gemini CLI, OpenCode, …), sends prompts and keystrokes to each one, reads the screen back to track progress, and orchestrates handoffs between them — all without leaving the user's real iTerm2 workspace.
+
 ## Features
 
 - HTTP REST API (no extra deps; uses iTerm2's bundled Python runtime).
