@@ -17,7 +17,7 @@ Designed to be installed into iTerm2's `AutoLaunch` directory so the service sta
         │  iterm2-harness    │   auth · audit · API directory
         │   (HTTP server)    │
         └─────────┬──────────┘
-                  │  iterm2 Python API (WebSocket)
+                  │  iTerm2 Python API
                   ▼
    ┌──────────────────────────────────────────────────────────────┐
    │                          iTerm2.app                          │
