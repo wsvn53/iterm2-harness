@@ -229,7 +229,7 @@ API_ENDPOINTS = [
         "query": {
             "limit": "Number of lines to return (from the bottom). Default 500.",
             "offset": "Skip this many lines from the bottom before taking limit; use to page through history. Default 0.",
-            "strip": "When true, collapse runs of whitespace into a single space and drop empty lines. Default false.",
+            "strip": "When true, collapse runs of horizontal whitespace (spaces/tabs) into a single space and drop empty lines; line breaks are preserved. Default false.",
         },
     },
     {
@@ -549,8 +549,10 @@ async def handle_get_screen(sid, query_params=None, **_):
     if limit > 0 and len(lines) > limit:
         lines = lines[-limit:]
     if strip:
-        # Collapse intra-line whitespace runs to a single space; drop empties.
-        lines = [re.sub(r"\s+", " ", l).strip() for l in lines]
+        # Collapse runs of horizontal whitespace (spaces, tabs) only; preserve
+        # \r/\n if any, so the caller can still see the original line breaks
+        # if a single grid line happened to contain embedded newlines.
+        lines = [re.sub(r"[ \t]+", " ", l).strip(" \t") for l in lines]
         lines = [l for l in lines if l]
 
     return 200, {
