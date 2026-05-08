@@ -16,6 +16,26 @@ Designed to be installed into iTerm2's `AutoLaunch` directory so the service sta
 
 ## Install
 
+### Homebrew (recommended)
+
+This repo ships its own formula under `Formula/iterm2-harness.rb`, so it can be installed via `brew tap` directly:
+
+```bash
+brew tap wsvn53/iterm2-harness https://github.com/wsvn53/iterm2-harness
+brew install iterm2-harness
+```
+
+The formula automatically symlinks the script into iTerm2's `AutoLaunch` folder during `post_install`, so iTerm2 launches the service on its next start. Re-run or undo this any time with:
+
+```bash
+iterm2-harness-install              # (re-)create the AutoLaunch symlink
+iterm2-harness-install --uninstall  # remove the symlink (keep the formula)
+```
+
+Upgrade later with `brew update && brew upgrade iterm2-harness`.
+
+### From source
+
 ```bash
 ./install.sh
 ```
