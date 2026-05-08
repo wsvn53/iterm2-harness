@@ -1,6 +1,8 @@
 # iterm2-harness
 
-A small HTTP API for remote-controlling iTerm2 — list windows/tabs/sessions, read screen contents (with scrollback), send text and keys. Adds **per-device authorization** (with an iTerm2 confirmation alert), **persistent tokens**, and **per-day audit logs**.
+An **AI-friendly control surface for iTerm2**, built on iTerm2's official Python API. It exposes a small, self-describing HTTP API that lets an AI agent (Claude Code, GPT-based tools, custom scripts, …) automate your iTerm2 workspace — list windows / tabs / sessions, read screen contents with scrollback, send text and keystrokes, rename sessions, and so on.
+
+Includes **simple but real authorization**: every new device must be approved via an iTerm2 modal alert; the resulting Bearer token is reused on subsequent requests. All actions are written to a daily JSON-line audit log so you can see exactly what your agent did.
 
 Designed to be installed into iTerm2's `AutoLaunch` directory so the service starts with iTerm2.
 
