@@ -207,4 +207,4 @@ Audit events: `server.start`, `server.reload`, `server.port_busy`, `server.port_
 
 ## License
 
-MIT.
+Apache License 2.0. See [LICENSE](LICENSE).

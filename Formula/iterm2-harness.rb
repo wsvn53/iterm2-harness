@@ -3,7 +3,7 @@ class Iterm2Harness < Formula
   homepage "https://github.com/wsvn53/iterm2-harness"
   url "https://github.com/wsvn53/iterm2-harness/archive/refs/heads/main.tar.gz"
   version "0.1.0"
-  license "MIT"
+  license "Apache-2.0"
   head "https://github.com/wsvn53/iterm2-harness.git", branch: "main"
 
   depends_on :macos
