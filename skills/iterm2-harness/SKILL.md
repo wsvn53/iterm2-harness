@@ -166,14 +166,34 @@ curl -s "$BASE_URL/api/v1/sessions/$SID/metadata" \
 
 ### Send text / commands
 
-`\r` simulates Enter. JSON-encode it as `\\r` in shell heredocs.
+`text` is sent as-is. The optional **`enter`** flag (default `false`) appends `\r` to trigger execution — use it when you want the command to run immediately. Leave it off when you only want to type into a prompt without submitting.
 
 ```bash
+# Type without executing (e.g. fill an input but let the user review)
 curl -s -X POST "$BASE_URL/api/v1/sessions/$SID/send-text" \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"text":"echo hello\r"}'
+  -d '{"text":"echo hello"}'
+
+# Type AND execute immediately — typical for shell automation
+curl -s -X POST "$BASE_URL/api/v1/sessions/$SID/send-text" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"echo hello","enter":true}'
 ```
+
+If you sent text without `enter` and decide to submit afterwards, fire a separate Enter via send-key:
+
+```bash
+curl -s -X POST "$BASE_URL/api/v1/sessions/$SID/send-key" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"key":"enter"}'
+```
+
+Guidelines:
+- Running a shell command (`ls`, `git status`, `npm run build`) → set `enter:true`.
+- Filling a TUI/REPL prompt where the user might still want to edit → leave `enter` off, then send Enter (or another key like `tab`/`escape`) explicitly when ready.
+- Never embed a literal `\r` inside `text` — use `enter:true` instead.
 
 ### Send a special key
 
@@ -228,10 +248,10 @@ curl -s -X POST "$BASE_URL/api/v1/sessions/$SID/send-key" \
 ### "Run a command and capture output"
 
 ```bash
-# Send the command
+# Send the command (enter:true so it runs immediately)
 curl -s -X POST "$BASE_URL/api/v1/sessions/$SID/send-text" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"text":"my-long-command\r"}'
+  -d '{"text":"my-long-command","enter":true}'
 
 # Wait, then read
 sleep 5

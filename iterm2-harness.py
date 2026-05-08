@@ -240,9 +240,12 @@ API_ENDPOINTS = [
     {
         "method": "POST", "path": "/api/v1/sessions/{session_id}/send-text",
         "auth": True,
-        "summary": "Send raw text to a session. Use \\r to simulate Enter.",
-        "body": {"text": "string, raw text to send"},
-        "example": {"text": "ls -la\r"},
+        "summary": "Send raw text to a session. Set enter=true to append \\r (simulate pressing Enter); default false.",
+        "body": {
+            "text": "string, raw text to send",
+            "enter": "bool, append \\r after text (default false)",
+        },
+        "example": {"text": "ls -la", "enter": True},
     },
     {
         "method": "POST", "path": "/api/v1/sessions/{session_id}/set-title",
@@ -604,10 +607,12 @@ async def handle_send_text(sid, body=None, **_):
     if not text:
         return 400, {
             "error": "Missing 'text' field",
-            "hint": "Example: {\"text\": \"ls -la\\r\"}",
+            "hint": "Example: {\"text\": \"ls -la\", \"enter\": true}",
         }
-    await session.async_send_text(text)
-    return 200, {"ok": True, "sent": text}
+    enter = bool(body.get("enter", False))
+    payload = text + ("\r" if enter else "")
+    await session.async_send_text(payload)
+    return 200, {"ok": True, "sent": payload, "enter": enter}
 
 
 async def handle_set_title(sid, body=None, **_):

@@ -110,7 +110,7 @@ Calling any unknown path or wrong method returns the full API directory in the e
 | GET | `/api/v1/sessions` | ✓ | Flat session list. Filterable. |
 | GET | `/api/v1/sessions/{id}/screen` | ✓ | Screen contents, with paging. |
 | GET | `/api/v1/sessions/{id}/metadata` | ✓ | Working dir, command line, job name, size. |
-| POST | `/api/v1/sessions/{id}/send-text` | ✓ | Send text. Body: `{"text": "ls\r"}`. |
+| POST | `/api/v1/sessions/{id}/send-text` | ✓ | Send text. Body: `{"text": "ls", "enter": true}`. `enter` defaults to false; when true, appends `\r`. |
 | POST | `/api/v1/sessions/{id}/send-key` | ✓ | Send a special key. Body: `{"key": "ctrl+c"}`. |
 
 ### `/api/v1/sessions` query filters
