@@ -793,74 +793,146 @@ def _is_probably_binary(data):
         return True
 
 
-async def handle_file_read(query_params=None, **_):
-    params = query_params or {}
-    path = params.get("path", "")
-    want_base64 = params.get("base64", "false").lower() == "true"
+async def handle_file_read(query_params, body, raw_body, headers, client_addr, token_info, **_):
+    """GET /api/v1/files — read a file with optional slice/tail/grep/line_numbers."""
+    import base64 as _b64
+    path_str = query_params.get("path", "").strip()
+    if not path_str:
+        return 400, error_payload("Missing ?path= query parameter")
 
-    ok, status, info = _file_access_check(path)
-    if not ok:
-        return status, info
-    real = info
+    real = os.path.realpath(path_str)
+    fa = FILE_ACCESS
+    if not fa.get("enabled", True):
+        return 403, error_payload("File access is disabled",
+                                  hint="Set file_access.enabled=true in config.json next to the script, then POST /api/v1/reload.")
+    allowed = fa.get("allowed_paths") or []
+    if allowed and not any(real.startswith(os.path.realpath(p)) for p in allowed):
+        return 403, error_payload("Path is outside allowed_paths",
+                                  hint=f"Allowed prefixes: {allowed}")
 
     if not os.path.exists(real):
-        return 404, {"error": f"File not found: {real}"}
+        return 404, error_payload(f"File not found: {real}")
     if os.path.isdir(real):
-        return 400, {
-            "error": f"Path is a directory: {real}",
-            "hint": "Use GET /api/v1/files/list?path=... to list a directory.",
-        }
+        return 400, error_payload("Path is a directory; use GET /api/v1/files/list instead")
+
+    use_base64 = query_params.get("base64", "false").lower() == "true"
     try:
-        with open(real, "rb") as f:
-            data = f.read()
-    except OSError as e:
-        return 500, {"error": f"Read failed: {e}"}
+        raw = open(real, "rb").read()
+    except PermissionError:
+        return 403, error_payload("Permission denied")
 
-    size = len(data)
-    if want_base64:
-        import base64
+    if use_base64:
         return 200, {
-            "path": real, "size": size,
+            "path": real,
+            "size": len(raw),
             "encoding": "base64",
-            "content": base64.b64encode(data).decode("ascii"),
+            "content": _b64.b64encode(raw).decode("ascii"),
         }
-    if _is_probably_binary(data):
-        return 415, {
-            "error": "File appears to be binary",
-            "hint": "Retry with ?base64=true to receive base64-encoded bytes.",
-            "path": real, "size": size,
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return 415, error_payload(
+            "File appears to be binary",
+            hint="Add ?base64=true to retrieve binary content as a base64-encoded string.")
+
+    all_lines = text.splitlines(keepends=True)
+    total_lines = len(all_lines)
+
+    def _int(key, default=None):
+        v = query_params.get(key)
+        if v is None:
+            return default
+        try:
+            return max(0, int(v))
+        except ValueError:
+            return default
+
+    lines_n      = _int("lines")
+    offset_n     = _int("offset", 1)   # 1-based
+    tail_n       = _int("tail")
+    line_numbers = query_params.get("line_numbers", "false").lower() == "true"
+    grep_pat     = query_params.get("grep", "")
+    grep_regex   = query_params.get("grep_regex", "false").lower() == "true"
+    grep_ctx     = _int("grep_context", 0)
+
+    # --- grep mode ---
+    if grep_pat:
+        try:
+            if grep_regex:
+                pat = re.compile(grep_pat, re.IGNORECASE)
+                match_fn = lambda s: bool(pat.search(s))
+            else:
+                lp = grep_pat.lower()
+                match_fn = lambda s: lp in s.lower()
+        except re.error as e:
+            return 400, error_payload(f"Invalid regex: {e}")
+
+        hit_indices = [i for i, l in enumerate(all_lines) if match_fn(l.rstrip("\n\r"))]
+
+        included = set()
+        for hi in hit_indices:
+            for ci in range(max(0, hi - grep_ctx), min(total_lines, hi + grep_ctx + 1)):
+                included.add(ci)
+        included = sorted(included)
+
+        out_lines = []
+        prev = None
+        for ci in included:
+            if prev is not None and ci > prev + 1:
+                out_lines.append("--\n")
+            lno = ci + 1
+            out_lines.append(f"{lno:>6}: {all_lines[ci]}")
+            prev = ci
+
+        if lines_n is not None:
+            filtered = []
+            count = 0
+            for l in out_lines:
+                filtered.append(l)
+                if l != "--\n":
+                    count += 1
+                    if count >= lines_n:
+                        break
+            out_lines = filtered
+
+        content = "".join(out_lines)
+        return 200, {
+            "path": real,
+            "size": len(raw),
+            "total_lines": total_lines,
+            "returned_lines": sum(1 for l in out_lines if l != "--\n"),
+            "encoding": "utf-8",
+            "content": content,
         }
+
+    # --- tail mode ---
+    if tail_n is not None:
+        start = max(0, total_lines - tail_n)
+        sliced = all_lines[start:]
+        first_lno = start + 1
+    else:
+        start = max(0, (offset_n or 1) - 1)
+        sliced = all_lines[start:start + lines_n] if lines_n is not None else all_lines[start:]
+        first_lno = start + 1
+
+    has_more = (first_lno + len(sliced) - 1) < total_lines
+
+    if line_numbers:
+        content = "".join(f"{first_lno + i:>6}: {l}" for i, l in enumerate(sliced))
+    else:
+        content = "".join(sliced)
+
     return 200, {
-        "path": real, "size": size,
+        "path": real,
+        "size": len(raw),
+        "total_lines": total_lines,
+        "returned_lines": len(sliced),
+        "offset": first_lno,
+        "has_more": has_more,
         "encoding": "utf-8",
-        "content": data.decode("utf-8"),
+        "content": content,
     }
-
-
-def _parse_multipart(raw, content_type):
-    """Minimal multipart/form-data parser. Returns dict of field_name -> bytes."""
-    m = re.search(r"boundary=([^;]+)", content_type)
-    if not m:
-        return None
-    boundary = m.group(1).strip().strip('"').encode()
-    delim = b"--" + boundary
-    parts = raw.split(delim)
-    out = {}
-    for part in parts:
-        part = part.strip(b"\r\n")
-        if not part or part == b"--":
-            continue
-        header_end = part.find(b"\r\n\r\n")
-        if header_end < 0:
-            continue
-        headers_raw = part[:header_end].decode("utf-8", "replace")
-        body = part[header_end + 4:]
-        if body.endswith(b"\r\n"):
-            body = body[:-2]
-        name_match = re.search(r'name="([^"]+)"', headers_raw)
-        if name_match:
-            out[name_match.group(1)] = body
-    return out
 
 
 async def handle_file_write(query_params=None, body=None, raw_body=None, headers=None, **_):
