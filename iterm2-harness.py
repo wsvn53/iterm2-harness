@@ -14,6 +14,10 @@ Endpoints:
   POST /api/v1/sessions/{id}/send-text           - send text
   POST /api/v1/sessions/{id}/send-key            - send key
   POST /api/v1/sessions/{id}/set-title           - set session title
+  GET    /api/v1/files?path=...                  - read a file
+  POST   /api/v1/files?path=...                  - write a file (json or multipart)
+  DELETE /api/v1/files?path=...                  - delete a file
+  GET    /api/v1/files/list?path=...             - list a directory
 
 Auth:    every request except /health and /auth/request needs Authorization: Bearer <token>
 Storage: ~/.iterm2-harness/tokens.json
@@ -32,12 +36,22 @@ from pathlib import Path
 import iterm2
 
 VERSION = "0.1.0"
-MAX_BODY_SIZE = 1024 * 1024
+MAX_BODY_SIZE = 32 * 1024 * 1024  # 32 MB; covers JSON bodies and file uploads.
 
-SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+# realpath() so that when this script is installed as a symlink under iTerm2's
+# AutoLaunch folder, config.json is still read from the actual source dir
+# (the brew prefix or the cloned repo), not from AutoLaunch itself.
+SCRIPT_DIR = Path(os.path.dirname(os.path.realpath(__file__)))
 CONFIG_FILE = SCRIPT_DIR / "config.json"
 
-DEFAULT_CONFIG = {"host": "0.0.0.0", "port": 6770}
+DEFAULT_CONFIG = {
+    "host": "0.0.0.0",
+    "port": 6770,
+    "file_access": {
+        "enabled": False,
+        "allowed_paths": [],
+    },
+}
 
 HOME_DIR = Path(os.path.expanduser("~/.iterm2-harness"))
 TOKENS_FILE = HOME_DIR / "tokens.json"
@@ -61,10 +75,11 @@ def load_config():
     # Env vars take precedence for ad-hoc overrides.
     host = os.environ.get("ITERM2_HARNESS_HOST", cfg.get("host", DEFAULT_CONFIG["host"]))
     port = int(os.environ.get("ITERM2_HARNESS_PORT", cfg.get("port", DEFAULT_CONFIG["port"])))
-    return host, port
+    file_access = cfg.get("file_access") or {}
+    return host, port, file_access
 
 
-HOST, PORT = load_config()
+HOST, PORT, FILE_ACCESS = load_config()
 
 KEY_MAP = {
     "enter": "\r", "return": "\r",
@@ -261,6 +276,50 @@ API_ENDPOINTS = [
         "body": {"key": "enter|tab|escape|up|down|left|right|home|end|backspace|delete|space|ctrl+{a-z}"},
         "example": {"key": "ctrl+c"},
     },
+    {
+        "method": "GET", "path": "/api/v1/files",
+        "auth": True,
+        "summary": "Read a file. Gated by file_access in config.json.",
+        "query": {
+            "path": "Absolute path of the file to read.",
+            "base64": "When true, return base64-encoded bytes instead of utf-8 text. Default false.",
+        },
+        "errors": {
+            "403": "file_access disabled or path outside allowed_paths",
+            "404": "file not found",
+            "415": "file is binary; retry with base64=true",
+        },
+    },
+    {
+        "method": "POST", "path": "/api/v1/files",
+        "auth": True,
+        "summary": "Write a file. Two modes: JSON body or multipart upload.",
+        "query": {"path": "Absolute path of the file to write."},
+        "body": {
+            "content": "string, the content to write (required for JSON mode)",
+            "encoding": "utf-8 (default) or base64",
+            "mkdir": "bool, create missing parent directories (default false)",
+            "append": "bool, append instead of overwrite (default false)",
+        },
+        "example": {"content": "hello\n", "mkdir": True},
+        "notes": "Or send Content-Type: multipart/form-data with a 'file' field for raw bytes; "
+                 "additional 'mkdir' / 'append' form fields are accepted.",
+    },
+    {
+        "method": "DELETE", "path": "/api/v1/files",
+        "auth": True,
+        "summary": "Delete a file (not a directory).",
+        "query": {"path": "Absolute path of the file to delete."},
+    },
+    {
+        "method": "GET", "path": "/api/v1/files/list",
+        "auth": True,
+        "summary": "List directory contents.",
+        "query": {
+            "path": "Absolute path of the directory.",
+            "recursive": "When true, walk the directory tree. Default false.",
+        },
+    },
 ]
 
 
@@ -341,6 +400,10 @@ ROUTES = [
     ("POST", r"/api/v1/sessions/(?P<sid>[^/]+)/send-text$", "handle_send_text"),
     ("POST", r"/api/v1/sessions/(?P<sid>[^/]+)/send-key$",  "handle_send_key"),
     ("POST", r"/api/v1/sessions/(?P<sid>[^/]+)/set-title$", "handle_set_title"),
+    ("GET",  r"/api/v1/files$",                             "handle_file_read"),
+    ("POST", r"/api/v1/files$",                             "handle_file_write"),
+    ("DELETE", r"/api/v1/files$",                           "handle_file_delete"),
+    ("GET",  r"/api/v1/files/list$",                        "handle_file_list"),
 ]
 
 
@@ -675,6 +738,283 @@ async def handle_send_key(sid, body=None, **_):
     return 200, {"ok": True, "key": key}
 
 
+# ─── File access ───────────────────────────────────────────
+
+def _file_access_check(abs_path):
+    """Return (ok, status, payload) for an absolute path under the access policy.
+
+    On success returns (True, 0, resolved_real_path). On failure returns
+    (False, status_code, error_body_dict).
+    """
+    if not FILE_ACCESS.get("enabled", False):
+        return False, 403, {
+            "error": "File access is disabled",
+            "hint": "Set file_access.enabled=true in config.json next to the script, "
+                    "then POST /api/v1/reload.",
+        }
+    if not abs_path:
+        return False, 400, {
+            "error": "Missing 'path' query parameter",
+            "hint": "Provide an absolute path, e.g. ?path=/Users/me/notes.txt",
+        }
+    if not os.path.isabs(abs_path):
+        return False, 400, {
+            "error": "Path must be absolute",
+            "hint": f"Got {abs_path!r}; pass a path starting with '/'.",
+        }
+    real = os.path.realpath(abs_path)
+    allowed = FILE_ACCESS.get("allowed_paths") or []
+    if allowed:
+        # A request path is permitted if its realpath sits under any allowed
+        # prefix (also realpath'd to handle symlinks in the policy itself).
+        ok = False
+        for prefix in allowed:
+            p = os.path.realpath(os.path.expanduser(prefix))
+            if real == p or real.startswith(p.rstrip("/") + "/"):
+                ok = True
+                break
+        if not ok:
+            return False, 403, {
+                "error": "Path is outside allowed_paths",
+                "hint": "Edit file_access.allowed_paths in config.json to grant access.",
+                "resolved_path": real,
+                "allowed_paths": allowed,
+            }
+    return True, 0, real
+
+
+def _is_probably_binary(data):
+    if b"\x00" in data:
+        return True
+    try:
+        data.decode("utf-8")
+        return False
+    except UnicodeDecodeError:
+        return True
+
+
+async def handle_file_read(query_params=None, **_):
+    params = query_params or {}
+    path = params.get("path", "")
+    want_base64 = params.get("base64", "false").lower() == "true"
+
+    ok, status, info = _file_access_check(path)
+    if not ok:
+        return status, info
+    real = info
+
+    if not os.path.exists(real):
+        return 404, {"error": f"File not found: {real}"}
+    if os.path.isdir(real):
+        return 400, {
+            "error": f"Path is a directory: {real}",
+            "hint": "Use GET /api/v1/files/list?path=... to list a directory.",
+        }
+    try:
+        with open(real, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return 500, {"error": f"Read failed: {e}"}
+
+    size = len(data)
+    if want_base64:
+        import base64
+        return 200, {
+            "path": real, "size": size,
+            "encoding": "base64",
+            "content": base64.b64encode(data).decode("ascii"),
+        }
+    if _is_probably_binary(data):
+        return 415, {
+            "error": "File appears to be binary",
+            "hint": "Retry with ?base64=true to receive base64-encoded bytes.",
+            "path": real, "size": size,
+        }
+    return 200, {
+        "path": real, "size": size,
+        "encoding": "utf-8",
+        "content": data.decode("utf-8"),
+    }
+
+
+def _parse_multipart(raw, content_type):
+    """Minimal multipart/form-data parser. Returns dict of field_name -> bytes."""
+    m = re.search(r"boundary=([^;]+)", content_type)
+    if not m:
+        return None
+    boundary = m.group(1).strip().strip('"').encode()
+    delim = b"--" + boundary
+    parts = raw.split(delim)
+    out = {}
+    for part in parts:
+        part = part.strip(b"\r\n")
+        if not part or part == b"--":
+            continue
+        header_end = part.find(b"\r\n\r\n")
+        if header_end < 0:
+            continue
+        headers_raw = part[:header_end].decode("utf-8", "replace")
+        body = part[header_end + 4:]
+        if body.endswith(b"\r\n"):
+            body = body[:-2]
+        name_match = re.search(r'name="([^"]+)"', headers_raw)
+        if name_match:
+            out[name_match.group(1)] = body
+    return out
+
+
+async def handle_file_write(query_params=None, body=None, raw_body=None, headers=None, **_):
+    params = query_params or {}
+    path = params.get("path", "")
+    ok, status, info = _file_access_check(path)
+    if not ok:
+        return status, info
+    real = info
+
+    content_type = (headers or {}).get("content-type", "")
+    data = None
+    mkdir = False
+    append = False
+
+    if content_type.startswith("multipart/form-data"):
+        parts = _parse_multipart(raw_body or b"", content_type)
+        if not parts or "file" not in parts:
+            return 400, {
+                "error": "Missing 'file' field in multipart body",
+                "hint": "Use a form field named 'file' to upload raw bytes.",
+            }
+        data = parts["file"]
+        mkdir = parts.get("mkdir", b"").decode("utf-8", "replace").lower() == "true"
+        append = parts.get("append", b"").decode("utf-8", "replace").lower() == "true"
+    else:
+        if body is None:
+            return 400, {
+                "error": "Missing JSON body",
+                "hint": "Send {\"content\": \"...\", \"encoding\": \"utf-8\"} or use multipart upload.",
+            }
+        mkdir = bool(body.get("mkdir", False))
+        append = bool(body.get("append", False))
+        content = body.get("content", None)
+        if content is None:
+            return 400, {
+                "error": "Missing 'content' field",
+                "hint": "Provide the string to write, e.g. {\"content\": \"hello\"}",
+            }
+        encoding = (body.get("encoding") or "utf-8").lower()
+        if encoding == "base64":
+            import base64
+            try:
+                data = base64.b64decode(content)
+            except Exception as e:
+                return 400, {"error": f"Invalid base64 content: {e}"}
+        else:
+            data = content.encode(encoding, "strict") if isinstance(content, str) else content
+
+    parent = os.path.dirname(real)
+    existed = os.path.exists(real)
+    if parent and not os.path.isdir(parent):
+        if mkdir:
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except OSError as e:
+                return 500, {"error": f"mkdir failed: {e}"}
+        else:
+            return 409, {
+                "error": f"Parent directory does not exist: {parent}",
+                "hint": "Pass mkdir=true to create it automatically.",
+            }
+
+    mode = "ab" if append else "wb"
+    try:
+        with open(real, mode) as f:
+            f.write(data)
+    except OSError as e:
+        return 500, {"error": f"Write failed: {e}"}
+
+    audit("file.write", path=real, size=len(data),
+          append=append, created=(not existed))
+    return 200, {
+        "path": real, "size": len(data),
+        "created": not existed, "append": append,
+    }
+
+
+async def handle_file_delete(query_params=None, **_):
+    params = query_params or {}
+    path = params.get("path", "")
+    ok, status, info = _file_access_check(path)
+    if not ok:
+        return status, info
+    real = info
+
+    if not os.path.exists(real):
+        return 404, {"error": f"File not found: {real}"}
+    if os.path.isdir(real):
+        return 400, {
+            "error": f"Path is a directory: {real}",
+            "hint": "Directory deletion is not supported by this endpoint.",
+        }
+    try:
+        os.remove(real)
+    except OSError as e:
+        return 500, {"error": f"Delete failed: {e}"}
+    audit("file.delete", path=real)
+    return 200, {"path": real, "deleted": True}
+
+
+async def handle_file_list(query_params=None, **_):
+    params = query_params or {}
+    path = params.get("path", "")
+    recursive = params.get("recursive", "false").lower() == "true"
+    ok, status, info = _file_access_check(path)
+    if not ok:
+        return status, info
+    real = info
+
+    if not os.path.exists(real):
+        return 404, {"error": f"Directory not found: {real}"}
+    if not os.path.isdir(real):
+        return 400, {
+            "error": f"Path is not a directory: {real}",
+            "hint": "Use GET /api/v1/files?path=... to read a file.",
+        }
+
+    entries = []
+    try:
+        if recursive:
+            for root, dirs, files in os.walk(real):
+                for name in dirs:
+                    entries.append(_describe_entry(os.path.join(root, name), real))
+                for name in files:
+                    entries.append(_describe_entry(os.path.join(root, name), real))
+        else:
+            for name in sorted(os.listdir(real)):
+                entries.append(_describe_entry(os.path.join(real, name), real))
+    except OSError as e:
+        return 500, {"error": f"List failed: {e}"}
+
+    return 200, {"path": real, "recursive": recursive, "entries": entries}
+
+
+def _describe_entry(full, root):
+    try:
+        st = os.lstat(full)
+    except OSError:
+        return {"name": os.path.relpath(full, root), "type": "unknown"}
+    if os.path.isdir(full):
+        typ = "dir"
+    elif os.path.islink(full):
+        typ = "link"
+    else:
+        typ = "file"
+    return {
+        "name": os.path.relpath(full, root),
+        "type": typ,
+        "size": st.st_size,
+        "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+    }
+
+
 HANDLERS = {
     "handle_index": handle_index,
     "handle_health": handle_health,
@@ -688,6 +1028,10 @@ HANDLERS = {
     "handle_send_text": handle_send_text,
     "handle_send_key": handle_send_key,
     "handle_set_title": handle_set_title,
+    "handle_file_read": handle_file_read,
+    "handle_file_write": handle_file_write,
+    "handle_file_delete": handle_file_delete,
+    "handle_file_list": handle_file_list,
 }
 
 
@@ -706,7 +1050,8 @@ async def handle_client(reader, writer):
         method, path, query_params, headers, raw_body = req
 
         body = None
-        if raw_body:
+        ctype = (headers or {}).get("content-type", "").lower()
+        if raw_body and not ctype.startswith("multipart/"):
             try:
                 body = json.loads(raw_body.decode("utf-8"))
             except json.JSONDecodeError:
@@ -763,6 +1108,8 @@ async def handle_client(reader, writer):
             **path_params,
             query_params=query_params,
             body=body,
+            raw_body=raw_body,
+            headers=headers,
             client_addr=client_addr,
             token_info=token_info,
         )

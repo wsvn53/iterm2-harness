@@ -105,9 +105,22 @@ end
 ```json
 {
   "host": "0.0.0.0",
-  "port": 6770
+  "port": 6770,
+  "file_access": {
+    "enabled": false,
+    "allowed_paths": []
+  }
 }
 ```
+
+### File-access config
+
+The file endpoints (`/api/v1/files*`) are **opt-in**:
+
+- `file_access.enabled` — master switch (default `false`). When `false`, all file endpoints return `403`.
+- `file_access.allowed_paths` — list of absolute path prefixes. A request path must `realpath()` under one of these. Empty list means *no restriction* (allow anywhere) once `enabled=true`. Always set realistic prefixes (e.g. `["/Users/me/Src", "/tmp"]`); the realpath check defeats `..` traversal.
+
+After editing config.json, call `POST /api/v1/reload` to pick up changes.
 
 Environment variables override the file:
 
@@ -158,6 +171,10 @@ Calling any unknown path or wrong method returns the full API directory in the e
 | GET | `/api/v1/sessions/{id}/screen` | ✓ | Screen contents, with paging. |
 | GET | `/api/v1/sessions/{id}/metadata` | ✓ | Working dir, command line, job name, size. |
 | POST | `/api/v1/sessions/{id}/send-text` | ✓ | Send text. Body: `{"text": "ls", "enter": true}`. `enter` defaults to false; when true, appends `\r`. |
+| GET    | `/api/v1/files?path=...`        | ✓ | Read a file. Add `base64=true` for binary. Requires `file_access` in config. |
+| POST   | `/api/v1/files?path=...`        | ✓ | Write a file. JSON body `{content,encoding,mkdir,append}` or `multipart/form-data` with field `file`. |
+| DELETE | `/api/v1/files?path=...`        | ✓ | Delete a file (not a directory). |
+| GET    | `/api/v1/files/list?path=...`   | ✓ | List a directory. Add `recursive=true` to walk. |
 | POST | `/api/v1/sessions/{id}/send-key` | ✓ | Send a special key. Body: `{"key": "ctrl+c"}`. |
 
 ### `/api/v1/sessions` query filters
