@@ -48,7 +48,7 @@ DEFAULT_CONFIG = {
     "host": "0.0.0.0",
     "port": 6770,
     "file_access": {
-        "enabled": False,
+        "enabled": True,
         "allowed_paths": [],
     },
 }
