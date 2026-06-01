@@ -228,13 +228,13 @@ API_ENDPOINTS = [
     {
         "method": "GET", "path": "/api/v1/sessions",
         "auth": True,
-        "summary": "Flat list of sessions (with parent window_id / tab_id). Filterable by name, job, command, path.",
+        "summary": "Flat list of sessions (with parent window_id / tab_id) — always including path / job_name / command_line. Enumerates visible, minimized, and buried sessions. Filterable by name, job, command, path.",
         "query": {
-            "name": "Filter by session name substring (case-insensitive).",
-            "job": "Filter by jobName. Note: some tools rename their process (e.g. claude reports its version like '2.1.132').",
-            "command": "Filter by full commandLine. Recommended for stable matching, e.g. command=claude.",
-            "path": "Filter by working directory substring.",
-            "regex": "When true, treat the above queries as regex patterns instead of substrings.",
+            "name": "Case-insensitive keyword matched against each '/'-separated component of the session name (e.g. name=android matches 'Claude/Minis/Android (...)').",
+            "job": "Case-insensitive keyword matched against each '/'-separated component of jobName. Note: some tools rename their process (e.g. claude reports its version like '2.1.132').",
+            "command": "Case-insensitive keyword matched against each '/'-separated component of commandLine; falls back to whole-string substring match when no '/' is present. Recommended for stable matching, e.g. command=claude.",
+            "path": "Case-insensitive keyword matched against each folder name of the working directory (e.g. path=minisapp matches '/Users/me/Src/.../MinisApp').",
+            "regex": "When true, treat each query as a Python regex applied to the FULL string (component splitting is skipped).",
         },
     },
     {
@@ -521,11 +521,17 @@ async def handle_list_windows(**_):
 
 async def handle_list_sessions(query_params=None, **_):
     """Filters (all AND'd; omit for full list):
-        name=<substring>     case-insensitive substring of session name
-        job=<substring>      jobName (running process name)
-        command=<substring>  full commandLine (recommended, more stable)
-        path=<substring>     working directory
-        regex=true           treat the above as regex instead of substring
+        name=<keyword>       any '/' component of the name contains keyword (case-insensitive)
+        job=<keyword>        any '/' component of jobName matches
+        command=<keyword>    any '/' component of commandLine matches
+        path=<keyword>       any '/' component of working dir matches
+                             (e.g. ?path=minisapp matches /…/OpenMinis/MinisApp)
+        regex=true           treat the above as a regex against the FULL string
+                             (component splitting is skipped in regex mode)
+
+    The response always includes path / job_name / command_line for every
+    session, whether filters are present or not. Buried (window-level
+    minimized) and split-pane minimized sessions are also enumerated.
     """
     app = await _get_app()
     params = query_params or {}
@@ -534,7 +540,6 @@ async def handle_list_sessions(query_params=None, **_):
     cmd_q = params.get("command", "")
     path_q = params.get("path", "")
     use_regex = params.get("regex", "false").lower() == "true"
-    need_meta = bool(job_q or cmd_q or path_q)
 
     def matches(haystack, needle):
         if not needle:
@@ -546,42 +551,61 @@ async def handle_list_sessions(query_params=None, **_):
                 return re.search(needle, haystack) is not None
             except re.error:
                 return False
-        return needle.lower() in haystack.lower()
+        # Substring match against each '/' component (folder name / process
+        # segment), case-insensitively. Falls back to whole-string match so
+        # callers can still write `?command=claude --resume` against a flat
+        # value with no separators.
+        nl = needle.lower()
+        hl = haystack.lower()
+        for component in hl.split("/"):
+            if component and nl in component:
+                return True
+        return nl in hl
 
-    sessions = []
+    async def _v(s, name):
+        try:
+            return (await s.async_get_variable(name)) or ""
+        except Exception:
+            return ""
+
+    async def _describe(s, window_id, tab_id):
+        job = await _v(s, "jobName")
+        command = await _v(s, "commandLine")
+        path = await _v(s, "path")
+        grid = getattr(s, "grid_size", None)
+        columns = grid.width if grid else 0
+        rows = grid.height if grid else 0
+        return {
+            "session_id": s.session_id, "name": s.name,
+            "window_id": window_id, "tab_id": tab_id,
+            "columns": columns, "rows": rows,
+            "job_name": job, "command_line": command, "path": path,
+        }
+
+    # Enumerate every visible / minimized / buried session so callers don't
+    # silently miss any.
+    candidates = []  # list of (session, window_id, tab_id)
     for window in app.windows:
         for tab in window.tabs:
-            for s in tab.sessions:
-                if not matches(s.name, name_q):
-                    continue
+            for s in tab.all_sessions:
+                candidates.append((s, window.window_id, tab.tab_id))
+    for s in getattr(app, "buried_sessions", []) or []:
+        candidates.append((s, None, None))
 
-                job = command = path = ""
-                if need_meta:
-                    async def _v(name):
-                        try:
-                            return (await s.async_get_variable(name)) or ""
-                        except Exception:
-                            return ""
-                    job = await _v("jobName")
-                    command = await _v("commandLine")
-                    path = await _v("path")
-                    if not matches(job, job_q):
-                        continue
-                    if not matches(command, cmd_q):
-                        continue
-                    if not matches(path, path_q):
-                        continue
-
-                entry = {
-                    "session_id": s.session_id, "name": s.name,
-                    "window_id": window.window_id, "tab_id": tab.tab_id,
-                    "columns": s.grid_size.width, "rows": s.grid_size.height,
-                }
-                if need_meta:
-                    entry["job_name"] = job
-                    entry["command_line"] = command
-                    entry["path"] = path
-                sessions.append(entry)
+    sessions = []
+    for s, wid, tid in candidates:
+        if not matches(s.name, name_q):
+            continue
+        entry = await _describe(s, wid, tid)
+        if not matches(entry["job_name"], job_q):
+            continue
+        if not matches(entry["command_line"], cmd_q):
+            continue
+        if not matches(entry["path"], path_q):
+            continue
+        if wid is None:
+            entry["buried"] = True
+        sessions.append(entry)
 
     return 200, {
         "sessions": sessions,
